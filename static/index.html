@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام تسجيل الحضور بالتعرف على الوجه</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #f4f7f6;
+            color: #333;
+            text-align: center;
+        }
+        #container {
+            background-color: #fff;
+            padding: 30px 40px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            width: 90%;
+            max-width: 600px;
+        }
+        video {
+            width: 100%;
+            max-width: 500px;
+            height: auto;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            margin-bottom: 20px;
+            transform: scaleX(-1); /* Mirror effect */
+        }
+        #userInfo {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+            min-height: 100px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        #userInfo img {
+            max-width: 100px;
+            max-height: 100px;
+            border-radius: 50%;
+            margin-bottom: 10px;
+            border: 2px solid #007bff;
+        }
+        #userInfo p {
+            margin: 5px 0;
+            font-size: 1.1em;
+        }
+        #statusMessage {
+            font-weight: bold;
+        }
+        .recognized {
+            color: green;
+        }
+        .unknown {
+            color: orange;
+        }
+        .no-face {
+            color: red;
+        }
+        .error {
+            color: #d9534f;
+        }
+        h1 {
+            color: #0056b3;
+            margin-bottom: 25px;
+        }
+        #snapshotCanvas { /* Hidden canvas for taking snapshots */
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>نظام تسجيل الحضور بالتعرف على الوجه</h1>
+        <video id="videoElement" autoplay playsinline></video>
+        <canvas id="snapshotCanvas"></canvas>
+        <div id="userInfo">
+            <p id="statusMessage">الرجاء الانتظار، يتم تهيئة الكاميرا...</p>
+            <img id="userImage" src="#" alt="صورة المستخدم" style="display:none;">
+            <p id="userName"></p>
+            <p id="attendanceTime"></p>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('videoElement');
+        const snapshotCanvas = document.getElementById('snapshotCanvas');
+        const statusMessage = document.getElementById('statusMessage');
+        const userNameDisplay = document.getElementById('userName');
+        const attendanceTimeDisplay = document.getElementById('attendanceTime');
+        const userImageDisplay = document.getElementById('userImage');
+        let stream;
+        let recognitionInterval = null;
+        const RECOGNITION_INTERVAL_MS = 2000; // Recognize every 2 seconds
+        let isProcessing = false; // Flag to prevent concurrent requests
+
+        async function setupCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+                video.srcObject = stream;
+                statusMessage.textContent = 'الكاميرا جاهزة. سيتم التعرف تلقائياً.';
+                statusMessage.className = '';
+                startRecognitionInterval();
+            } catch (err) {
+                console.error("Error accessing camera: ", err);
+                statusMessage.textContent = 'خطأ في الوصول إلى الكاميرا: ' + err.message;
+                statusMessage.className = 'error';
+            }
+        }
+
+        function startRecognitionInterval() {
+            if (recognitionInterval) clearInterval(recognitionInterval);
+            recognitionInterval = setInterval(async () => {
+                if (isProcessing) return; // Skip if a request is already in progress
+                await recognizeFace();
+            }, RECOGNITION_INTERVAL_MS);
+        }
+
+        async function recognizeFace() {
+            if (!stream || !video.srcObject || video.readyState < video.HAVE_ENOUGH_DATA) {
+                console.log("Video stream not ready or not available.");
+                return;
+            }
+            isProcessing = true;
+            const context = snapshotCanvas.getContext('2d');
+            snapshotCanvas.width = video.videoWidth;
+            snapshotCanvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
+            const imageDataURL = snapshotCanvas.toDataURL('image/jpeg');
+
+            try {
+                const response = await fetch('/recognize', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ image: imageDataURL }),
+                });
+
+                const result = await response.json();
+
+                userNameDisplay.textContent = '';
+                attendanceTimeDisplay.textContent = '';
+                userImageDisplay.style.display = 'none';
+                statusMessage.className = '';
+
+                if (response.ok) {
+                    if (result.name === "NO_FACE_DETECTED") {
+                        statusMessage.textContent = result.message || 'لم يتم اكتشاف أي وجه.';
+                        statusMessage.className = 'no-face';
+                    } else if (result.name === "Unknown") {
+                        statusMessage.textContent = result.message || 'تم اكتشاف وجه، لكنه غير معروف.';
+                        statusMessage.className = 'unknown';
+                    } else if (result.name) {
+                        statusMessage.textContent = result.message || (`تم التعرف على: ${result.name}`);
+                        statusMessage.className = 'recognized';
+                        userNameDisplay.textContent = `الاسم: ${result.name}`;
+                        if (result.time) {
+                            attendanceTimeDisplay.textContent = `وقت الحضور: ${result.time}`;
+                        }
+                        if (result.user_image_url) {
+                            userImageDisplay.src = result.user_image_url + '?t=' + new Date().getTime(); // Cache busting
+                            userImageDisplay.style.display = 'block';
+                        } else {
+                             userImageDisplay.style.display = 'none';
+                        }
+                    } else if (result.error) {
+                        statusMessage.textContent = `خطأ: ${result.error}`;
+                        statusMessage.className = 'error';
+                    } else {
+                        statusMessage.textContent = 'تم استلام رد غير متوقع من الخادم.';
+                        statusMessage.className = 'error';
+                    }
+                } else {
+                    statusMessage.textContent = `خطأ في الخادم: ${result.error || response.statusText}`;
+                    statusMessage.className = 'error';
+                }
+            } catch (error) {
+                console.error('Error during recognition:', error);
+                statusMessage.textContent = 'حدث خطأ أثناء محاولة التعرف.';
+                statusMessage.className = 'error';
+            }
+            isProcessing = false;
+        }
+
+        // Initialize
+        setupCamera();
+
+        // Optional: Stop recognition when tab is not visible to save resources
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                if (recognitionInterval) clearInterval(recognitionInterval);
+                recognitionInterval = null;
+            } else {
+                if (stream && !recognitionInterval) {
+                    startRecognitionInterval();
+                }
+            }
+        });
+
+    </script>
+</body>
+</html>
+
